@@ -1,0 +1,122 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    env_file: .env
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d
+      - ./raw-data:/raw-data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - data_net
+
+  spark:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: spark
+    ports:
+      - "4040:4040"
+    volumes:
+      - ./spark-apps:/opt/spark/apps
+      - ./raw-data:/raw-data
+    environment:
+      - SPARK_MODE=standalone
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - data_net
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.3
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+    networks:
+      - data_net
+
+  cassandra:
+    image: cassandra:4.1
+    ports:
+      - "9042:9042"
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -u cassandra -p cassandra -e 'DESCRIBE KEYSPACES'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - data_net
+
+  neo4j:
+    image: neo4j:5.12
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      - NEO4J_AUTH=neo4j/neo4jpassword
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "neo4jpassword", "RETURN 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - data_net
+
+  mongodb:
+    image: mongo:7.0
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - data_net
+
+  valkey:
+    image: valkey/valkey:7.2
+    ports:
+      - "6379:6379"
+    volumes:
+      - valkey_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 1s
+      retries: 5
+    networks:
+      - data_net
+
+volumes:
+  postgres_data:
+  clickhouse_data:
+  cassandra_data:
+  neo4j_data:
+  mongodb_data:
+  valkey_data:
+
+networks:
+  data_net:
+    driver: bridge
