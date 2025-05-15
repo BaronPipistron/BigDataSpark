@@ -1,23 +1,13 @@
 import os
 
-from dotenv import load_dotenv
-from py4j.java_gateway import java_import
-
 from pyspark.sql import SparkSession
 from pyspark.sql.window import Window
 from pyspark.sql.functions import *
 
-DOTENV_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
 
-if os.path.exists(DOTENV_PATH):
-    load_dotenv(DOTENV_PATH)
-else:
-    print("ERROR: Could not find the .env file.")
-    exit(1)
-
-POSTGRES_USER = os.getenv('POSTGRES_USER')
-POSTGRES_PASSWORD = os.getenv('POSTGRES_PASSWORD')
-POSTGRES_DB = os.getenv('POSTGRES_DB')
+POSTGRES_USER = "user"
+POSTGRES_PASSWORD = "password"
+POSTGRES_DB = "salesdb"
 
 DB_URL = f"jdbc:postgresql://postgres:5432/{POSTGRES_DB}"
 
@@ -35,18 +25,24 @@ def load_table(session, table_name: str) -> DataFrame:
         .option("dbtable", table_name) \
         .option("user", POSTGRES_USER) \
         .option("password", POSTGRES_PASSWORD) \
+        .option("driver", "org.postgresql.Driver") \
         .load()
 
 
-def write_to_postgres(dataframe: DataFrame, table_name: str) -> None:
-    dataframe.write \
-        .format("jdbc") \
-        .option("url", DB_URL) \
-        .option("dbtable", table_name) \
-        .option("user", POSTGRES_USER) \
-        .option("password", POSTGRES_PASSWORD) \
-        .mode("overwrite") \
-        .save()
+
+
+def write_to_postgres(df: DataFrame, table_name: str) -> None:
+    df.write.jdbc(
+        url=DB_URL,
+        table=table_name,
+        mode="append",
+        properties={
+            "user": POSTGRES_USER,
+            "password": POSTGRES_PASSWORD,
+            "driver": "org.postgresql.Driver"
+        }
+    )
+
 
 
 def snowflake_transform(dataframe: DataFrame) -> None:
@@ -143,22 +139,27 @@ def snowflake_transform(dataframe: DataFrame) -> None:
 
     ################## dim_date #####################
 
+    # dim_date
     dim_date = dataframe.select("sale_date") \
-        .filter(col("sale_date").isNotNull()) \
-        .distinct()
+    .filter(col("sale_date").isNotNull()) \
+    .distinct()
 
     dim_date = dim_date.withColumn("day", dayofmonth("sale_date")) \
-        .withColumn("month", month("sale_date")) \
-        .withColumn("year", year("sale_date")) \
-        .withColumn("quarter", quarter("sale_date")) \
-        .withColumn("day_of_week", dayofweek("sale_date")) \
-        .withColumn("is_weekend", when(col("day_of_week") >= 6, True).otherwise(False))
+    .withColumn("month", month("sale_date")) \
+    .withColumn("year", year("sale_date")) \
+    .withColumn("quarter", quarter("sale_date")) \
+    .withColumn("day_of_week", dayofweek("sale_date")) \
+    .withColumn("is_weekend", when(col("day_of_week") >= 6, True).otherwise(False))
 
     window_spec = Window.orderBy("sale_date")
     dim_date = dim_date.withColumn("date_id", row_number().over(window_spec))
+
+    # Переименовываем столбец для совпадения с DDL
     dim_date = dim_date.withColumnRenamed("sale_date", "date")
 
+    # Записываем в PostgreSQL
     write_to_postgres(dim_date, "dim_date")
+
 
     ################ dim_suppliers ##################
 
@@ -448,181 +449,10 @@ def snowflake_transform(dataframe: DataFrame) -> None:
 
     write_to_postgres(fact_sales, "fact_sales")
 
+spark = SparkSession.builder \
+    .appName("Spark ETL") \
+    .getOrCreate()
 
-from pyspark.sql import SparkSession
-from py4j.java_gateway import java_import
+raw_df = load_table(spark, "mock_data")
 
-
-def create_clickhouse_connection(spark):
-    """Создает подключение к ClickHouse через явное создание драйвера"""
-    try:
-        # Инициализация Java классов
-        java_import(spark.sparkContext._jvm, "java.sql.*")
-        java_import(spark.sparkContext._jvm, "java.util.Properties")
-
-        # Явная загрузка и создание драйвера
-        driver_class = spark.sparkContext._jvm.Class.forName("com.clickhouse.jdbc.ClickHouseDriver")
-        driver = driver_class.newInstance()
-
-        # Создание URL и свойств подключения
-        url = "jdbc:clickhouse://clickhouse:8123/"
-        props = spark.sparkContext._jvm.java.util.Properties()
-        props.setProperty("user", "default")
-
-        # Создание подключения напрямую через драйвер
-        conn = driver.connect(url, props)
-        return conn
-
-    except Exception as e:
-        print(f"Ошибка при создании подключения: {str(e)}")
-        raise
-
-
-def create_clickhouse_base(spark, db_name: str) -> None:
-    """Создает базу данных в ClickHouse"""
-    conn = None
-    try:
-        conn = create_clickhouse_connection(spark)
-        stmt = conn.createStatement()
-        stmt.executeUpdate(f"CREATE DATABASE IF NOT EXISTS {db_name}")
-        print(f"База данных {db_name} успешно создана")
-    except Exception as e:
-        print(f"Ошибка при создании базы: {str(e)}")
-        raise
-    finally:
-        if conn:
-            conn.close()
-
-
-def write_to_clickhouse(spark, df, table_name, db_name="product_analysis"):
-    """Записывает DataFrame в таблицу ClickHouse"""
-    try:
-        df.write \
-            .format("jdbc") \
-            .option("url", f"jdbc:clickhouse://clickhouse:8123/{db_name}") \
-            .option("driver", "com.clickhouse.jdbc.ClickHouseDriver") \
-            .option("dbtable", table_name) \
-            .option("user", "default") \
-            .mode("append") \
-            .save()
-        print(f"Данные записаны в {db_name}.{table_name}")
-    except Exception as e:
-        print(f"Ошибка при записи данных: {str(e)}")
-        raise
-
-
-def generate_showcase(session) -> None:
-    ################# showcase 1 ####################
-
-    fact_sales = load_table(session, "fact_sales")
-    dim_products = load_table(session, "dim_products")
-    dim_categories = load_table(session, "dim_product_categories")
-
-    top_products = fact_sales.join(dim_products, "product_id") \
-        .groupBy("product_id", "name") \
-        .agg(
-            sum("quantity").alias("total_quantity"),
-            sum("total_price").alias("total_revenue"),
-            count("*").alias("sales_count")
-        ).orderBy(desc("total_quantity")).limit(10)
-
-    revenue_by_category = fact_sales.join(dim_products, "product_id") \
-        .join(dim_categories, "category_id") \
-        .groupBy("category_id", "category_name") \
-        .agg(
-            sum("total_price").alias("category_revenue"),
-            round(avg(dim_products["rating"]), 2).alias("avg_rating")
-        ).orderBy(desc("category_revenue"))
-
-    products_with_reviews = dim_products.join(
-        fact_sales.groupBy("product_id").agg(
-            sum("quantity").alias("total_quantity"),
-            sum("total_price").alias("total_revenue")
-        ),
-        "product_id", "left"
-    ).select(
-        "product_id",
-        "name",
-        "rating",
-        "reviews",
-        "total_quantity",
-        "total_revenue"
-    )
-
-    create_clickhouse_base(session, "product_analysis")
-
-    ddl_queries = [
-        """
-        CREATE TABLE IF NOT EXISTS product_analysis.top_products (
-            product_id Int32,
-            name String,
-            total_quantity Int32,
-            total_revenue Decimal(18,2),
-            sales_count Int32,
-            load_date Date DEFAULT today()
-        ) ENGINE = MergeTree()
-        ORDER BY (total_quantity, product_id)
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS product_analysis.revenue_by_category (
-            category_id Int32,
-            category_name String,
-            category_revenue Decimal(18,2),
-            avg_rating Float32,
-            load_date Date DEFAULT today()
-        ) ENGINE = MergeTree()
-        ORDER BY (category_id)
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS product_analysis.products_with_reviews (
-            product_id Int32,
-            name String,
-            rating Float32,
-            reviews Int32,
-            total_quantity Int32,
-            total_revenue Decimal(18,2),
-            load_date Date DEFAULT today()
-        ) ENGINE = MergeTree()
-        ORDER BY (product_id)
-        """
-    ]
-
-    conn = spark.sparkContext._jvm.java.sql.DriverManager.getConnection(CLICKHOUSE_URL, CLICKHOUSE_PROPERTIES)
-
-    for query in ddl_queries:
-        conn.createStatement().executeUpdate(query)
-
-    conn.close()
-
-    write_to_clickhouse(top_products, "product_analysis", "top_products")
-    write_to_clickhouse(revenue_by_category, "product_analysis", "revenue_by_category")
-    write_to_clickhouse(products_with_reviews, "product_analysis", "products_with_reviews")
-
-    ################# showcase 2 ####################
-
-    ################# showcase 3 ####################
-
-    ################# showcase 4 ####################
-
-    ################# showcase 5 ####################
-
-    ################# showcase 6 ####################
-
-
-if __name__ == "__main__":
-    spark = SparkSession.builder \
-        .appName("Spark ETL") \
-        .config("spark.jars", "/opt/spark/jars/postgresql-42.5.4.jar") \
-        .config("spark.jars", "/opt/spark/jars/spark-cassandra-connector_2.12-3.4.0.jar") \
-        .config("spark.jars", "/opt/spark/jars/neo4j-connector-apache-spark_2.12-5.0.0.jar") \
-        .config("spark.jars", "/opt/spark/jars/mongo-spark-connector_2.12-10.2.0.jar") \
-        .config("spark.jars", "/opt/spark/jars/spark-redis_2.12-3.1.0.jar") \
-        .config("spark.jars", "/opt/spark/jars/clickhouse-jdbc-0.4.6.jar") \
-        .config("spark.hadoop.security.authentication", "simple") \
-        .getOrCreate()
-
-    raw_df = load_table(spark, "raw_data")
-
-    #snowflake_transform(raw_df)
-
-    generate_showcase(spark)
+snowflake_transform(raw_df)

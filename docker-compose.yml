@@ -1,122 +1,84 @@
 services:
   postgres:
-    image: postgres:15
-    container_name: postgres
-    env_file: .env
-    ports:
-      - "5433:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./init-scripts:/docker-entrypoint-initdb.d
-      - ./raw-data:/raw-data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-    networks:
-      - data_net
-
-  spark:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: spark
-    ports:
-      - "4040:4040"
-    volumes:
-      - ./spark-apps:/opt/spark/apps
-      - ./raw-data:/raw-data
+    image: 'postgres:15'
+    container_name: 'postgres'
     environment:
-      - SPARK_MODE=standalone
+      POSTGRES_USER: 'user'
+      POSTGRES_PASSWORD: 'password'
+      POSTGRES_DB: 'salesdb'
+    ports:
+      - '5432:5432'
+    volumes:
+      - './postgres-data:/var/lib/postgresql/data'
+
+  spark-master:
+    image: 'bitnami/spark:latest'
+    container_name: 'spark-master'
+    environment:
+      SPARK_MODE: 'master'
+    ports:
+      - '7077:7077'
+      - '8080:8080'
     depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - data_net
+      - 'postgres'
+    volumes:
+      - ./spark-apps:/opt/spark-apps
+      - ./prepared:/opt/bitnami/spark/prepared
+      - ./libs:/opt/bitnami/spark/external-jars
+
+  spark-worker:
+    image: 'bitnami/spark:latest'
+    container_name: 'spark-worker'
+    environment:
+      SPARK_MODE: 'worker'
+      SPARK_MASTER_URL: 'spark://spark-master:7077'
+    depends_on:
+      - 'spark-master'
+    volumes:
+      - ./libs:/opt/bitnami/spark/external-jars
 
   clickhouse:
-    image: clickhouse/clickhouse-server:23.3
+    image: 'yandex/clickhouse-server:latest'
+    container_name: 'clickhouse'
     ports:
-      - "8123:8123"
-      - "9000:9000"
+      - '8123:8123'
+      - '9000:9000'
     volumes:
-      - clickhouse_data:/var/lib/clickhouse
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8123/ping"]
-      interval: 5s
-      timeout: 2s
-      retries: 5
-    networks:
-      - data_net
+      - './clickhouse-data:/var/lib/clickhouse'
 
   cassandra:
-    image: cassandra:4.1
+    image: 'cassandra:4'
+    container_name: 'cassandra'
     ports:
-      - "9042:9042"
-    volumes:
-      - cassandra_data:/var/lib/cassandra
-    healthcheck:
-      test: ["CMD-SHELL", "cqlsh -u cassandra -p cassandra -e 'DESCRIBE KEYSPACES'"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-    networks:
-      - data_net
+      - '9042:9042'
 
   neo4j:
-    image: neo4j:5.12
-    ports:
-      - "7474:7474"
-      - "7687:7687"
+    image: 'neo4j:5'
+    container_name: 'neo4j'
     environment:
-      - NEO4J_AUTH=neo4j/neo4jpassword
-    volumes:
-      - neo4j_data:/data
-    healthcheck:
-      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "neo4jpassword", "RETURN 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - data_net
-
-  mongodb:
-    image: mongo:7.0
+      NEO4J_AUTH: 'neo4j/password'
     ports:
-      - "27017:27017"
+      - '7474:7474'
+      - '7687:7687'
     volumes:
-      - mongodb_data:/data/db
-    healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - data_net
+      - './neo4j-data:/data'
+
+  mongo:
+    image: 'mongo:6'
+    container_name: 'mongo'
+    ports:
+      - '27017:27017'
+    volumes:
+      - './mongo-data:/data/db'
 
   valkey:
-    image: valkey/valkey:7.2
+    image: 'valkey/valkey:latest'
+    container_name: 'valkey'
     ports:
-      - "6379:6379"
+      - '8081:8081'
     volumes:
-      - valkey_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 1s
-      retries: 5
-    networks:
-      - data_net
-
-volumes:
-  postgres_data:
-  clickhouse_data:
-  cassandra_data:
-  neo4j_data:
-  mongodb_data:
-  valkey_data:
+      - './valkey-data:/var/lib/valkey'
 
 networks:
-  data_net:
-    driver: bridge
+  default:
+    name: 'lab-network'
